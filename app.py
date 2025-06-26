@@ -23,7 +23,7 @@ app = Flask(__name__)
 def load_config():
     """Loads the configuration from config.json or creates one by default."""
     if not os.path.exists(CONFIG_FILE):
-        print(f "Configuration file '{CONFIG_FILE}' not found. Creation...")
+        print(f"Configuration file '{CONFIG_FILE}' not found. Creation...")
         default_trackers = [url.strip() for url in os.getenv("TARGET_TRACKERS", "").split(',') if url.strip()]
         config = {
             "enabled": True,
@@ -145,11 +145,13 @@ def worker_loop():
     manager = TransmissionManager()
     check_interval = int(os.getenv("CHECK_INTERVAL", 60))
     
-    # Special verification for REENABLE_ALL at every startup if asked
+    # Special verification for REENABLE_ALL when run manually
     if len(sys.argv) > 1 and sys.argv[1] == 'REENABLE_ALL':
+        print("Executing one-time REENABLE_ALL command...")
         manager.reenable_all_trackers()
-        # we don't exit, webserver must continue to run
-        print("Single reactivation completed. Script continues in server mode.")
+        print("REENABLE_ALL command finished. Exiting this one-off process.")
+        # This exit is CRUCIAL for docker-compose exec to terminate correctly
+        sys.exit(0)
 
 
     while True:
