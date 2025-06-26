@@ -1,0 +1,17 @@
+services:
+  transmission-manager:
+    container_name: transmission-manager
+    build: .
+    env_file:
+      - .env
+    restart: unless-stopped
+    volumes:
+      - ./config:/data
+    ports:
+      - "8080:8080"
+    networks:
+      - custom-network # This should match your network name
+
+networks:
+  custom-network:
+    external: true  # network is created elsewhere

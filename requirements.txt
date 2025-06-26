@@ -1,0 +1,4 @@
+transmission-rpc
+python-dotenv
+Flask
+gunicorn
