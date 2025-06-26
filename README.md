@@ -1,4 +1,4 @@
-# Transmission Tracker Manager
+# Transmission Auto Toggle Torrent
 
 A lightweight, web-based utility to automatically manage specific trackers in a Transmission instance. This tool disables target trackers on incomplete torrents and re-enables them upon completion. Ideal for private trackers that have strict ratio rules or for managing public trackers you only want to seed from.
 
