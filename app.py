@@ -15,7 +15,7 @@ load_dotenv()
 
 # used to store the state and parameters of the app dynamically,
 # so that they can be read and modified by the web interface without having to restart the container.
-CONFIG_FILE = "config.json"
+CONFIG_FILE = "/data/config.json"
 
 app = Flask(__name__)
 
@@ -265,14 +265,14 @@ HTML_TEMPLATE = """
             messageBox.textContent = text;
             messageBox.className = `message ${type}`;
             messageBox.style.display = 'block';
-            setTimeout(() => { messageBox.style.display = 'none'; }, 3000);
+            setTimeout(() => { messageBox.style.display = 'none'; }, 4000);
         }
 
         async function fetchConfig() {
             try {
                 const response = await fetch('/api/config');
-                const config = await response.json();
-                currentState = config;
+                if (!response.ok) throw new Error('Server returned an error');
+                currentState = await response.json();
                 updateUI();
             } catch (error) {
                 console.error('Error loading config:', error);
@@ -285,7 +285,7 @@ HTML_TEMPLATE = """
             if (currentState.enabled) {
                 statusText.textContent = 'Enabled';
                 statusText.className = 'status-on';
-                toggleButton.textContent = 'Disable Service';
+                toggleButton.textContent = 'Disable Service (and re-enable all trackers)';
             } else {
                 statusText.textContent = 'Disabled';
                 statusText.className = 'status-off';
@@ -296,19 +296,28 @@ HTML_TEMPLATE = """
 
         toggleForm.addEventListener('submit', async (e) => {
             e.preventDefault();
-            const newConfig = { ...currentState, enabled: !currentState.enabled };
+            let response;
             try {
-                const response = await fetch('/api/config', {
-                    method: 'POST',
-                    headers: { 'Content-Type': 'application/json' },
-                    body: JSON.stringify(newConfig)
-                });
+                if (currentState.enabled) {
+                    // If service is currently enabled, call the endpoint to disable it and re-enable all trackers.
+                    response = await fetch('/api/disable_and_reenable', { method: 'POST' });
+                    showMessage('Service disabled. Global tracker re-enabling initiated.', 'success');
+                } else {
+                    // If service is disabled, just re-enable it via the standard config endpoint.
+                    const newConfig = { ...currentState, enabled: true };
+                    response = await fetch('/api/config', {
+                        method: 'POST',
+                        headers: { 'Content-Type': 'application/json' },
+                        body: JSON.stringify(newConfig)
+                    });
+                    showMessage('Service enabled successfully!', 'success');
+                }
                 if (!response.ok) throw new Error('Server error');
                 currentState = await response.json();
                 updateUI();
-                showMessage('Status saved successfully!');
             } catch (error) {
                 showMessage('Error during save.', 'error');
+                console.error('Toggle error:', error);
             }
         });
 
@@ -322,12 +331,13 @@ HTML_TEMPLATE = """
                     headers: { 'Content-Type': 'application/json' },
                     body: JSON.stringify(newConfig)
                 });
-                 if (!response.ok) throw new Error('Server error');
+                if (!response.ok) throw new Error('Server error');
                 currentState = await response.json();
                 updateUI();
                 showMessage('Tracker list saved!');
             } catch (error) {
                 showMessage('Error during save.', 'error');
+                console.error('Save trackers error:', error);
             }
         });
 
