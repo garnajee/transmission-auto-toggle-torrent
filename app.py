@@ -21,17 +21,14 @@ app = Flask(__name__)
 
 # --- Configuration management (via JSON file) ---
 def load_config():
-    """Loads the configuration from config.json or creates one by default."""
+    config_dir = os.path.dirname(CONFIG_FILE)
+    if not os.path.exists(config_dir):
+        os.makedirs(config_dir)
     if not os.path.exists(CONFIG_FILE):
-        print(f"Configuration file '{CONFIG_FILE}' not found. Creation...")
         default_trackers = [url.strip() for url in os.getenv("TARGET_TRACKERS", "").split(',') if url.strip()]
-        config = {
-            "enabled": True,
-            "target_trackers": default_trackers
-        }
+        config = {"enabled": True, "target_trackers": default_trackers}
         save_config(config)
         return config
-    
     with open(CONFIG_FILE, 'r') as f:
         return json.load(f)
 
@@ -47,6 +44,8 @@ class TransmissionManager:
     def __init__(self):
         self.client = self._connect()
         self.prefix = "disabled-"
+        self.already_disabled_ids = set()
+        self._populate_initial_disabled_state()
 
     def _connect(self):
         """Establishes a connection to the Transmission RPC server."""
@@ -62,6 +61,17 @@ class TransmissionManager:
             print(f"Transmission connection error: {e}")
             return None
 
+    def _populate_initial_disabled_state(self):
+        """At startup, populate all torrents already disabled to maintain the state."""
+        if not self.client: return
+        print("Initialise status: search for trackers already disabled...")
+        all_torrents = self.client.get_torrents()
+        for torrent in all_torrents:
+            for tracker in torrent.trackers:
+                if f"://{self.prefix}" in tracker.announce:
+                    self.already_disabled_ids.add(torrent.id)
+                    break # No need to check other trackers for this torrent 
+
     def _change_trackers(self, torrent_id: int, new_tracker_list: list[list[str]]):
         if not self.client: return
         self.client.change_torrent(ids=[torrent_id], tracker_list=new_tracker_list)
@@ -76,56 +86,65 @@ class TransmissionManager:
             return
 
         all_torrents = self.client.get_torrents()
-        print(f"Vérification de {len(all_torrents)} torrents...")
-        
-        torrents_to_disable, torrents_to_enable = [], []
+        print(f"Verification of {len(all_torrents)} torrents...")
 
         for torrent in all_torrents:
-            if not any(self._is_tracker_targeted(tracker.announce, target_trackers) for tracker in torrent.trackers):
+            has_target_tracker = any(self._is_tracker_targeted(tracker.announce, target_trackers) for tracker in torrent.trackers)
+            if not has_target_tracker:
                 continue
 
-            needs_change = False
-            is_complete = torrent.percent_done >= 1.0
+            # --- REACTIVATION LOGIC (when the torrent is complete) ---
+            if torrent.percent_done >= 1.0:
+                if torrent.id in self.already_disabled_ids:
+                    print(f"Torrent {torrent.id} ({torrent.name}) est complet. Réactivation des trackers...")
+                    self._toggle_target_trackers(torrent, target_trackers, disable=False)
+                    self.already_disabled_ids.remove(torrent.id)
+                continue
 
-            if not is_complete: # Torrent not complete -> we want to disable it
-                if any(self._is_tracker_targeted(t.announce, target_trackers) and f"://{self.prefix}" not in t.announce for t in torrent.trackers):
-                    needs_change = True
-                    torrents_to_disable.append(torrent)
-            else: # Torrent complete -> we want to reactivate
-                if any(self._is_tracker_targeted(t.announce, target_trackers) and f"://{self.prefix}" in t.announce for t in torrent.trackers):
-                    needs_change = True
-                    torrents_to_enable.append(torrent)
-        
-        if torrents_to_disable:
-            print(f"Deactivation for IDs: {[t.id for t in torrents_to_disable]}")
-            self._toggle_target_trackers(torrents_to_disable, target_trackers, disable=True)
+            # --- DISABLE LOGIC (for incomplete torrents) ---
+            if torrent.id in self.already_disabled_ids:
+                continue
 
-        if torrents_to_enable:
-            print(f"Reactivation for IDs: {[t.id for t in torrents_to_enable]}")
-            self._toggle_target_trackers(torrents_to_enable, target_trackers, disable=False)
+            # Condition 1: Are there connected peers sending us data?
+            has_connected_peers = torrent.peers_getting_from_us > 0
             
+            # Condition 2: Is there at least one complete (100%) seeder among the peers?
+            has_full_seeder = any(p['progress'] >= 1.0 for p in torrent.peers)
+
+            has_started_downloading = torrent.percent_done > 0.0
+
+            print(f"  - Analysis of {torrent.id} ({torrent.name[:30]}...):")
+            print(f"    - Conditions: Pairs({has_connected_peers}), Seeders({has_full_seeder}), Progrès({has_started_downloading})")
+
+            if has_connected_peers and has_full_seeder and has_started_downloading:
+                print(f"    -> CONDITIONS MET. Deactivation of torrent trackers {torrent.id}.")
+                self._toggle_target_trackers(torrent, target_trackers, disable=True)
+                self.already_disabled_ids.add(torrent.id)
+            else:
+                print(f"    -> CONDITIONS NOT FILLED. The tracker will not be disabled for the time being.")
+
         print("Verification run complete.")
 
-    def _toggle_target_trackers(self, torrents: list, target_trackers: list[str], disable: bool):
-        for torrent in torrents:
-            new_tiers = defaultdict(list)
-            for tracker in torrent.trackers:
-                original_url = tracker.announce
-                if self._is_tracker_targeted(original_url, target_trackers):
-                    if disable and f"://{self.prefix}" not in original_url:
-                        new_tiers[tracker.tier].append(original_url.replace("://", f"://{self.prefix}"))
-                    elif not disable and f"://{self.prefix}" in original_url:
-                        new_tiers[tracker.tier].append(original_url.replace(f"://{self.prefix}", "://"))
-                    else:
-                        new_tiers[tracker.tier].append(original_url)
+    def _toggle_target_trackers(self, torrent, target_trackers: list[str], disable: bool):
+        """Toggle target trackers for a single torrent."""
+        new_tiers = defaultdict(list)
+        for tracker in torrent.trackers:
+            original_url = tracker.announce
+            if self._is_tracker_targeted(original_url, target_trackers):
+                if disable and f"://{self.prefix}" not in original_url:
+                    new_tiers[tracker.tier].append(original_url.replace("://", f"://{self.prefix}"))
+                elif not disable and f"://{self.prefix}" in original_url:
+                    new_tiers[tracker.tier].append(original_url.replace(f"://{self.prefix}", "://"))
                 else:
                     new_tiers[tracker.tier].append(original_url)
-            
-            final_tracker_list = [new_tiers[tier] for tier in sorted(new_tiers.keys())]
-            self._change_trackers(torrent.id, final_tracker_list)
+            else:
+                new_tiers[tracker.tier].append(original_url)
+        
+        final_tracker_list = [new_tiers[tier] for tier in sorted(new_tiers.keys())]
+        self._change_trackers(torrent.id, final_tracker_list)
 
     def reenable_all_trackers(self):
-        """Emergency function to reactivate everything"""
+        """Forces the reactivation of ALL deactivated trackers for ALL torrents"""
         if not self.client: return
         print("Launch global tracker reactivation...")
         all_torrents = self.client.get_torrents()
@@ -136,23 +155,26 @@ class TransmissionManager:
                 for tracker in torrent.trackers:
                     new_tiers[tracker.tier].append(tracker.announce.replace(f"://{self.prefix}", "://"))
                 self._change_trackers(torrent.id, [new_tiers[tier] for tier in sorted(new_tiers.keys())])
+
+        # Resets our internal state
+        self.already_disabled_ids.clear()
         print("Global reactivation complete.")
 
 # --- Background worker ---
 
 def worker_loop():
     """The monitoring loop, which runs in a separate thread."""
-    manager = TransmissionManager()
-    check_interval = int(os.getenv("CHECK_INTERVAL", 60))
-    
     # Special verification for REENABLE_ALL when run manually
     if len(sys.argv) > 1 and sys.argv[1] == 'REENABLE_ALL':
         print("Executing one-time REENABLE_ALL command...")
+        manager = TransmissionManager()
         manager.reenable_all_trackers()
         print("REENABLE_ALL command finished. Exiting this one-off process.")
         # This exit is CRUCIAL for docker-compose exec to terminate correctly
         sys.exit(0)
 
+    manager = TransmissionManager()
+    check_interval = int(os.getenv("CHECK_INTERVAL", 60))
 
     while True:
         try:
@@ -325,18 +347,27 @@ def index():
 def api_config():
     """API for reading and writing the configuration."""
     if request.method == 'POST':
-        new_config = request.json
-        if 'enabled' in new_config and isinstance(new_config['enabled'], bool):
-            current_config = load_config()
-            current_config['enabled'] = new_config['enabled']
-            save_config(current_config)
-
-        if 'target_trackers' in new_config and isinstance(new_config['target_trackers'], list):
-            current_config = load_config()
-            current_config['target_trackers'] = [str(t) for t in new_config['target_trackers']]
-            save_config(current_config)
-        
+        new_config_data = request.json
+        current_config = load_config()
+        if 'enabled' in new_config_data:
+            current_config['enabled'] = new_config_data['enabled']
+        if 'target_trackers' in new_config_data:
+            current_config['target_trackers'] = [str(t) for t in new_config_data['target_trackers']]
+        save_config(current_config)
     return jsonify(load_config())
+
+@app.route('/api/disable_and_reenable', methods=['POST'])
+def disable_and_reenable():
+    """Disables the service and initiates a global reactivation of trackers."""
+    print("API call received to disable service and re-enable all trackers.")
+    manager = TransmissionManager()
+    manager.reenable_all_trackers()
+    
+    config = load_config()
+    config['enabled'] = False
+    save_config(config)
+    
+    return jsonify(config)
 
 # Start the worker in a separate thread
 print("Starting background worker thread...")
