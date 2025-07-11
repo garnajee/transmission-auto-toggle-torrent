@@ -16,6 +16,7 @@ load_dotenv()
 # used to store the state and parameters of the app dynamically,
 # so that they can be read and modified by the web interface without having to restart the container.
 CONFIG_FILE = "/data/config.json"
+DEBUG_MODE = os.getenv("DEBUG_MODE", "False").lower() in ("true", "1", "t")
 
 app = Flask(__name__)
 
@@ -86,42 +87,54 @@ class TransmissionManager:
             return
 
         all_torrents = self.client.get_torrents()
-        print(f"Verification of {len(all_torrents)} torrents...")
+        print(f"Checking {len(all_torrents)} torrents...")
 
         for torrent in all_torrents:
             has_target_tracker = any(self._is_tracker_targeted(tracker.announce, target_trackers) for tracker in torrent.trackers)
             if not has_target_tracker:
                 continue
 
-            # --- REACTIVATION LOGIC (when the torrent is complete) ---
+            # --- RE-ENABLING LOGIC (when torrent is complete) ---
             if torrent.percent_done >= 1.0:
                 if torrent.id in self.already_disabled_ids:
-                    print(f"Torrent {torrent.id} ({torrent.name}) est complet. Réactivation des trackers...")
+                    print(f"Torrent {torrent.id} ({torrent.name}) is complete. Re-enabling trackers...")
                     self._toggle_target_trackers(torrent, target_trackers, disable=False)
                     self.already_disabled_ids.remove(torrent.id)
                 continue
 
-            # --- DISABLE LOGIC (for incomplete torrents) ---
+            # --- DISABLING LOGIC (for incomplete torrents) ---
             if torrent.id in self.already_disabled_ids:
                 continue
 
             # Condition 1: Are there connected peers sending us data?
-            has_connected_peers = torrent.peers_getting_from_us > 0
+            has_connected_peers = torrent.peers_sending_to_us > 0
             
             # Condition 2: Is there at least one complete (100%) seeder among the peers?
             has_full_seeder = any(p['progress'] >= 1.0 for p in torrent.peers)
 
             has_started_downloading = torrent.percent_done > 0.0
 
-            print(f"  - Analysis of {torrent.id} ({torrent.name[:30]}...):")
-            print(f"    - Conditions: Pairs({has_connected_peers}), Seeders({has_full_seeder}), Progrès({has_started_downloading})")
+            if DEBUG_MODE:
+                print(f"\n[DEBUG] Analyzing torrent: {torrent.id} ({torrent.name[:40]}...)")
+                print(f"  - Raw values:")
+                print(f"    - percent_done: {torrent.percent_done:.2%}")
+                print(f"    - peers_sending_to_us: {torrent.peers_sending_to_us}")
+                print(f"    - peers_list: {[f'{{ip: {p["address"]}, progress: {p["progress"]:.1%}}}' for p in torrent.peers]}")
+                print(f"  - Condition evaluation:")
+                print(f"    - 1. Has connected download peers? -> {has_connected_peers}")
+                print(f"    - 2. Has a full seeder? -> {has_full_seeder}")
+                print(f"    - 3. Has download started? -> {has_started_downloading}")
+
+            # Standard log message
+            print(f"  - Analyzing {torrent.id} ({torrent.name[:30]}...):")
+            print(f"    - Conditions: Peers({has_connected_peers}), Seeders({has_full_seeder}), Progress({has_started_downloading})")
 
             if has_connected_peers and has_full_seeder and has_started_downloading:
-                print(f"    -> CONDITIONS MET. Deactivation of torrent trackers {torrent.id}.")
+                print(f"    -> CONDITIONS MET. Disabling trackers for torrent {torrent.id}.")
                 self._toggle_target_trackers(torrent, target_trackers, disable=True)
                 self.already_disabled_ids.add(torrent.id)
             else:
-                print(f"    -> CONDITIONS NOT FILLED. The tracker will not be disabled for the time being.")
+                print(f"    -> CONDITIONS NOT MET. Tracker will not be disabled at this time.")
 
         print("Verification run complete.")
 
@@ -146,11 +159,11 @@ class TransmissionManager:
     def reenable_all_trackers(self):
         """Forces the reactivation of ALL deactivated trackers for ALL torrents"""
         if not self.client: return
-        print("Launch global tracker reactivation...")
+        print("Launching global tracker re-enabling...")
         all_torrents = self.client.get_torrents()
         for torrent in all_torrents:
             if any(f"://{self.prefix}" in t.announce for t in torrent.trackers):
-                print(f"Reactivate trackers for torrent {torrent.id} ({torrent.name})")
+                print(f"Re-enabling trackers for torrent {torrent.id} ({torrent.name})")
                 new_tiers = defaultdict(list)
                 for tracker in torrent.trackers:
                     new_tiers[tracker.tier].append(tracker.announce.replace(f"://{self.prefix}", "://"))
@@ -158,7 +171,7 @@ class TransmissionManager:
 
         # Resets our internal state
         self.already_disabled_ids.clear()
-        print("Global reactivation complete.")
+        print("Global re-enabling complete.")
 
 # --- Background worker ---
 
@@ -381,6 +394,8 @@ def disable_and_reenable():
 
 # Start the worker in a separate thread
 print("Starting background worker thread...")
+if DEBUG_MODE:
+    print("!!!! DEBUG MODE IS ENABLED !!!!")
 worker_thread = threading.Thread(target=worker_loop)
 worker_thread.daemon = True  # Allows the main program to exit even if the thread is running
 worker_thread.start()
