@@ -119,7 +119,15 @@ class TransmissionManager:
                 print(f"  - Raw values:")
                 print(f"    - percent_done: {torrent.percent_done:.2%}")
                 print(f"    - peers_sending_to_us: {torrent.peers_sending_to_us}")
-                print(f"    - peers_list: {[f'{{ip: {p["address"]}, progress: {p["progress"]:.1%}}}' for p in torrent.peers]}")
+
+                # Correction : Boucle explicite pour éviter les erreurs de scope
+                if not torrent.peers:
+                    print("    - peers_list: []")
+                else:
+                    print("    - peers_list:")
+                    for p in torrent.peers:
+                        print(f"      - {{ip: {p['address']}, progress: {p['progress']:.1%}}}")
+
                 print(f"  - Condition evaluation:")
                 print(f"    - 1. Has connected download peers? -> {has_connected_peers}")
                 print(f"    - 2. Has a full seeder? -> {has_full_seeder}")
